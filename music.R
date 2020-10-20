@@ -154,4 +154,4 @@ Est.pregrouping.bulk = music_prop.cluster(bulk.eset = bulk_data, sc.eset = sc_da
 jitter.fig = Jitter_Est(Est.pregrouping.bulk,method.name = c('MuSiC', 'NNLS'),title = 'Jitter plot of Est Pregrouping Proportions')
 saveRDS(Est.pregrouping.bulk,'callcell_music')
 
-# saveRDS(Est.pregrouping.bulk,'control_music')
+saveRDS(Est.pregrouping.bulk,'control_music')
