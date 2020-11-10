@@ -11,8 +11,8 @@ library(edgeR)
 library(plyr)
 
 #input dataset and metadata
-sc_data <- read.delim(file='scRNA_logCounts.tsv')
-sc_meta <- read.delim(file='scRNA_metadata.tsv')
+sc_data <- read.delim(file='~/GrubmanReproduce/scRNA_logCounts.tsv')
+sc_meta <- read.delim(file='~/GrubmanReproduce/scRNA_metadata.tsv')
 sc_data=as.matrix(sc_data)
 sddt=sc_data
 genenames=sddt[,1]
@@ -809,11 +809,442 @@ ggplot(sex_ct_bar, aes(x=CellType,y=numDEGs, fill = RegulateDirection)) +theme_b
   scale_fill_manual(values = c("#CCEEFF", "#FFDDDD"))+
   labs(x = "cell types", y = "Numbers of DEGs", title = "DEGs in Control male&female")
 
-
-
-
-
-
 ###Human single-nuclei differential expression and gene set enrichment analysis
-# find markers for every cluster compared to all remaining cells, report only the positive ones
+library(fgsea)
+library(Matrix)
+library(BRETIGEA)
+library(edgeR)
+library(plyr)
+library(tidyverse)
+library(tidymodels)
+library(dplyr)
+library(pheatmap)
+###1. preprocessing
+#import data
+countMatrix=scdt
+#DEGList
+group <- factor(sc_dt$ident,levels = c('mic','oli','ast','hybrid','opc','neu','end','undefined'))
+y <- DGEList(counts = countMatrix, group = group)
+#preprocessing
+y <- calcNormFactors(y)
+#design
+design <- model.matrix(~0+group)
+rownames(design) <- colnames(y)
+#DEG
+y <- estimateDisp(y, design = design) 
+fit <- glmQLFit(y, design, robust=TRUE)
+qlf <- glmQLFTest(fit,contrast=c(1,-1/7,-1/7,-1/7,-1/7,-1/7,-1/7,-1/7))
+
+resNoFilt <- topTags(qlf, n=nrow(qlf$table))
+restb=resNoFilt$table
+restable=restb[restb$logFC>0.5,]
+restable=restable[restable$FDR<0.01,]
+summary(dt <- decideTestsDGE(qlf))
+#1*groupast -0.142857142857143*groupend -0.142857142857143*grouphybrid -0.142857142857143*groupmic -0.142857142857143*groupneu -0.142857142857143*groupoli -0.142857142857143*groupopc -0.142857142857143*groupundefined
+#down:2934, up:6284, notsig:1632
+isDE <- as.logical(dt)
+DEnames <- rownames(y)[isDE]
+#head(DEnames)
+
+#rank genes
+qlftable=qlf$table[DEnames,]
+head(qlftable)
+qlftb=qlftable
+qlftb$gene=as.character(rownames(qlftb))
+qlftb$fcsign <- sign(qlftb$logFC)
+qlftb$logP=-log10(qlftb$PValue)
+qlftb$metric= qlftb$logP/qlftb$fcsign
+qlftb$value=ifelse(qlftb$metric==Inf,NA,qlftb$metric)
+qlftb=na.omit(qlftb)
+final<-qlftb[,c("gene", "value")]
+final=as.tibble(final)
+ranks <- deframe(final)
+head(ranks, 20)
+
+# Load the pathways into a named list
+pathways.hallmark <- gmtPathways("h.all.v7.2.symbols.gmt")
+# pathways.hallmark <- gmtPathways("h.all.v6.2.symbols.gmt")
+# Show the first few pathways, and within those, show only the first few genes. 
+pathways.hallmark %>% 
+  head() %>% 
+  lapply(head)
+#run fgsea
+fgseaRes <- fgsea(pathways=pathways.hallmark, stats=ranks, nperm=100000)
+
+#visualization
+fgseaResTidy <- fgseaRes %>%
+  as_tibble() 
+# Show in a nice table:
+fgseaResTidy %>% 
+  dplyr::select(-leadingEdge, -ES, -nMoreExtreme) %>% 
+  arrange(padj) %>% 
+  DT::datatable()
+#plot
+plt=ggplot(fgseaResTidy, aes(reorder(pathway, NES), NES)) +
+  geom_col(aes(fill=padj<0.05)) +
+  coord_flip() +
+  labs(x="Pathway", y="Normalized Enrichment Score",
+       title="Hallmark pathways NES from GSEA") + 
+  theme_minimal()
+
+
+###define func to perform DE analysis and pathway analysis
+deanalysis=function(countMatrix,group,pathways.hallmark=pathways.hallmark,contrast=c(1,-1/7,-1/7,-1/7,-1/7,-1/7,-1/7,-1/7)){
+  #define deg
+  y <- DGEList(counts = countMatrix, group = group)
+  y <- calcNormFactors(y)
+  design <- model.matrix(~0+group)
+  rownames(design) <- colnames(y)
+  y <- estimateDisp(y, design = design) 
+  fit <- glmQLFit(y, design, robust=TRUE)
+  qlf <- glmQLFTest(fit,contrast=contrast)
+  resNoFilt <- topTags(qlf, n=nrow(qlf$table))
+  restb=resNoFilt$table
+  restable=restb[restb$logFC>0.5,]
+  dt=restable[restable$FDR<0.01,]
+  DEnames <- rownames(dt)
+  #rank degs
+  qlftb=qlf$table[DEnames,]
+  qlftb$gene=as.character(rownames(qlftb))
+  qlftb$fcsign <- sign(qlftb$logFC)
+  qlftb$logP=-log10(qlftb$PValue)
+  sre=summary(qlftb$PValue)
+  qlftb$logP=-log10(qlftb$PValue+0.0001)
+  qlftb$metric= qlftb$logP/qlftb$fcsign
+  #qlftb$value=ifelse(qlftb$metric==Inf,NA,qlftb$metric)
+  #qlftb=na.omit(qlftb)
+  checkqlftb=qlftb
+  final<-qlftb[,c("gene", "metric")]
+  final=as.tibble(final)
+  ranks <- deframe(final)
+  
+  result=list(qlf,DEnames,sre,checkqlftb,ranks)
+  return(result)
+}
+############
+gseafunc=function(ranks){
+  fgseaRes <- fgsea(pathways=pathways.hallmark, stats=ranks, nperm=100000)
+  #previsua
+  fgseaResTidy <- fgseaRes %>%
+    as_tibble()
+  
+  result=list(fgseaRes,fgseaResTidy)
+  return(result)
+}
+pathways.go=gmtPathways("c5.go.v7.2.symbols.gmt")
+pathways.kegg=gmtPathways("c2.cp.kegg.v7.2.symbols.gmt")
+###1.cell-type-specific genes: DE was performed between the cell type of interest and the avg of the remaining 5 other cell types.
+#mic
+group= factor(sc_dt$ident,levels = c('mic','oli','ast','hybrid','opc','neu','end','undefined'))
+mic_m1=deanalysis(countMatrix,group)
+micrk=unlist(mic_m1[5])
+fgseaRes <- fgsea(pathways=pathways.go, stats=micrk, nperm=100000)
+mic_r1_go=fgseaRes[which(fgseaRes$padj<=0.1),]
+mic_r1_goall=fgseaRes
+fgseaRes <- fgsea(pathways=pathways.kegg, stats=micrk, nperm=100000)
+mic_r1_kegg=fgseaRes[which(fgseaRes$padj<=0.1),]
+mic_r1_keggall=fgseaRes
+mic_re1=rbind(mic_r1_go[,c('pathway','NES')],mic_r1_kegg[,c('pathway','NES')])
+colnames(mic_re1)=c('pathway','mic_NES')
+mic_re1all=rbind(mic_r1_goall[,c('pathway','NES')],mic_r1_keggall[,c('pathway','NES')])
+colnames(mic_re1all)=c('pathway','mic_NES')
+#oli
+group= factor(sc_dt$ident,levels = c('oli','mic','ast','hybrid','opc','neu','end','undefined'))
+oli_m1=deanalysis(countMatrix,group)
+olirk=unlist(oli_m1[5])
+fgseaRes <- fgsea(pathways=pathways.go, stats=olirk, nperm=100000)
+oli_r1_goall=fgseaRes
+oli_r1_go=fgseaRes[which(fgseaRes$padj<=0.1),]
+fgseaRes <- fgsea(pathways=pathways.kegg, stats=olirk, nperm=100000)
+oli_r1_keggall=fgseaRes
+oli_r1_kegg=fgseaRes[which(fgseaRes$padj<=0.1),]
+oli_re1=rbind(oli_r1_go[,c('pathway','NES')],oli_r1_kegg[,c('pathway','NES')])
+colnames(oli_re1)=c('pathway','oli_NES')
+oli_re1all=rbind(oli_r1_goall[,c('pathway','NES')],oli_r1_keggall[,c('pathway','NES')])
+colnames(oli_re1all)=c('pathway','oli_NES')
+#ast
+group= factor(sc_dt$ident,levels = c('ast','oli','mic','hybrid','opc','neu','end','undefined'))
+ast_m1=deanalysis(countMatrix,group)
+astrk=unlist(ast_m1[5])
+fgseaRes <- fgsea(pathways=pathways.go, stats=astrk, nperm=100000)
+ast_r1_goall=fgseaRes
+ast_r1_go=fgseaRes[which(fgseaRes$padj<=0.1),]
+fgseaRes <- fgsea(pathways=pathways.kegg, stats=astrk, nperm=100000)
+ast_r1_keggall=fgseaRes
+ast_r1_kegg=fgseaRes[which(fgseaRes$padj<=0.1),]
+ast_re1=rbind(ast_r1_go[,c('pathway','NES')],ast_r1_kegg[,c('pathway','NES')])
+colnames(ast_re1)=c('pathway','ast_NES')
+ast_re1all=rbind(ast_r1_goall[,c('pathway','NES')],ast_r1_keggall[,c('pathway','NES')])
+colnames(ast_re1all)=c('pathway','ast_NES')
+#opc
+group= factor(sc_dt$ident,levels = c('opc','ast','oli','mic','hybrid','neu','end','undefined'))
+opc_m1=deanalysis(countMatrix,group)
+opcrk=unlist(opc_m1[5])
+fgseaRes <- fgsea(pathways=pathways.go, stats=opcrk, nperm=100000)
+opc_r1_goall=fgseaRes
+opc_r1_go=fgseaRes[which(fgseaRes$padj<=0.1),]
+fgseaRes <- fgsea(pathways=pathways.kegg, stats=opcrk, nperm=100000)
+opc_r1_keggall=fgseaRes
+opc_r1_kegg=fgseaRes[which(fgseaRes$padj<=0.1),]
+opc_re1=rbind(opc_r1_go[,c('pathway','NES')],opc_r1_kegg[,c('pathway','NES')])
+colnames(opc_re1)=c('pathway','opc_NES')
+opc_re1all=rbind(opc_r1_goall[,c('pathway','NES')],opc_r1_keggall[,c('pathway','NES')])
+colnames(opc_re1all)=c('pathway','opc_NES')
+#neu
+group= factor(sc_dt$ident,levels = c('neu','ast','oli','mic','hybrid','opc','end','undefined'))
+neu_m1=deanalysis(countMatrix,group)
+neurk=unlist(neu_m1[5])
+fgseaRes <- fgsea(pathways=pathways.go, stats=neurk, nperm=100000)
+neu_r1_goall=fgseaRes
+neu_r1_go=fgseaRes[which(fgseaRes$padj<=0.1),]
+fgseaRes <- fgsea(pathways=pathways.kegg, stats=neurk, nperm=100000)
+neu_r1_keggall=fgseaRes
+neu_r1_kegg=fgseaRes[which(fgseaRes$padj<=0.1),]
+neu_re1=rbind(neu_r1_go[,c('pathway','NES')],neu_r1_kegg[,c('pathway','NES')])
+colnames(neu_re1)=c('pathway','neu_NES')
+neu_re1all=rbind(neu_r1_goall[,c('pathway','NES')],neu_r1_keggall[,c('pathway','NES')])
+colnames(neu_re1all)=c('pathway','neu_NES')
+#end
+group= factor(sc_dt$ident,levels = c('end','ast','oli','mic','hybrid','opc','neu','undefined'))
+end_m1=deanalysis(countMatrix,group)
+endrk=unlist(end_m1[5])
+fgseaRes <- fgsea(pathways=pathways.go, stats=endrk, nperm=100000)
+end_r1_goall=fgseaRes
+end_r1_go=fgseaRes[which(fgseaRes$padj<=0.1),]
+fgseaRes <- fgsea(pathways=pathways.kegg, stats=endrk, nperm=100000)
+end_r1_keggall=fgseaRes
+end_r1_kegg=fgseaRes[which(fgseaRes$padj<=0.1),]
+end_re1=rbind(end_r1_go[,c('pathway','NES')],end_r1_kegg[,c('pathway','NES')])
+colnames(end_re1)=c('pathway','end_NES')
+end_re1all=rbind(end_r1_goall[,c('pathway','NES')],end_r1_keggall[,c('pathway','NES')])
+colnames(end_re1all)=c('pathway','end_NES')
+#hybrid
+group= factor(sc_dt$ident,levels = c('hybrid','neu','ast','oli','mic','opc','end','undefined'))
+hybrid_m1=deanalysis(countMatrix,group)
+hybridrk=unlist(hybrid_m1[5])
+fgseaRes <- fgsea(pathways=pathways.go, stats=hybridrk, nperm=100000)
+hybrid_r1_goall=fgseaRes
+hybrid_r1_go=fgseaRes[which(fgseaRes$padj<=0.1),]
+fgseaRes <- fgsea(pathways=pathways.kegg, stats=hybridrk, nperm=100000)
+hybrid_r1_keggall=fgseaRes
+hybrid_r1_kegg=fgseaRes[which(fgseaRes$padj<=0.1),]
+hybrid_re1=rbind(hybrid_r1_go[,c('pathway','NES')],hybrid_r1_kegg[,c('pathway','NES')])
+colnames(hybrid_re1)=c('pathway','hybrid_NES')
+hybrid_re1all=rbind(hybrid_r1_goall[,c('pathway','NES')],hybrid_r1_keggall[,c('pathway','NES')])
+colnames(hybrid_re1all)=c('pathway','hybrid_NES')
+#undefined
+group= factor(sc_dt$ident,levels = c('undefined','end','ast','oli','mic','hybrid','opc','neu'))
+undefined_m1=deanalysis(countMatrix,group)
+undefinedrk=unlist(undefined_m1[5])
+fgseaRes <- fgsea(pathways=pathways.go, stats=undefinedrk, nperm=100000)
+undefined_r1_goall=fgseaRes
+undefined_r1_go=fgseaRes[which(fgseaRes$padj<=0.1),]
+fgseaRes <- fgsea(pathways=pathways.kegg, stats=undefinedrk, nperm=100000)
+undefined_r1_keggall=fgseaRes
+undefined_re1all=rbind(undefined_r1_goall[,c('pathway','NES')],undefined_r1_keggall[,c('pathway','NES')])
+colnames(undefined_re1all)=c('pathway','undefined_NES')
+undefined_r1_kegg=fgseaRes[which(fgseaRes$padj<=0.1),]
+undefined_re1=rbind(undefined_r1_go[,c('pathway','NES')],undefined_r1_kegg[,c('pathway','NES')])
+colnames(undefined_re1)=c('pathway','undefined_NES')
+
+#save
+#saveRDS(list(neu_m1,mic_m1,ast_m1,oli_m1,opc_m1,undefined_m1,hybrid_m1,end_m1),file = 'm1result.rds')
+#visualization
+#mergepath=as.data.frame(c(undefined_r1$pathway,hybrid_r1$pathway,ast_r1$pathway,opc_r1$pathway,oli_r1$pathway,end_r1$pathway,neu_r1$pathway,mic_r1$pathway))
+aa=unique(c(undefined_r1$pathway,hybrid_r1$pathway,ast_r1$pathway,opc_r1$pathway,oli_r1$pathway,end_r1$pathway,neu_r1$pathway,mic_r1$pathway))
+m1re=as.data.frame(aa)
+colnames(m1re)='pathway'
+m1re=left_join(m1re,oli_re1)
+m1re=left_join(m1re,ast_re1)
+m1re=left_join(m1re,mic_re1)
+m1re=left_join(m1re,opc_re1)
+m1re=left_join(m1re,neu_re1)
+m1re=left_join(m1re,hybrid_re1)
+m1re=left_join(m1re,undefined_re1)
+m1re=left_join(m1re,end_re1)
+#rownames(m1re)=substr(m1re[,1],10,300)
+rownames(m1re)=m1re[,1]
+dfm1=m1re[,-1]
+pathway_m1=rownames(dfm1[rowSums(is.na(dfm1))<7, ])
+pathway_m1=as.data.frame(pathway_m1)
+names(pathway_m1)='pathway'
+pathway_m1=left_join(pathway_m1,undefined_re1all)
+pathway_m1=left_join(pathway_m1,hybrid_re1all)
+pathway_m1=left_join(pathway_m1,end_re1all)
+pathway_m1=left_join(pathway_m1,mic_re1all)
+pathway_m1=left_join(pathway_m1,ast_re1all)
+pathway_m1=left_join(pathway_m1,neu_re1all)
+pathway_m1=left_join(pathway_m1,oli_re1all)
+pathway_m1=left_join(pathway_m1,opc_re1all)
+pathwayname=substr(pathway_m1[,1],4,300)
+rownames(pathway_m1)=pathwayname
+pathway_m1=pathway_m1[,-1]
+
+pathway_m1[is.na(pathway_m1)]<-0
+pheatmap(pathway_m1)
+###2. cells from Ad libraries and control patient libraries for each cell type.
+getdeg=function(metadata,countdata){
+  group <- factor(metadata)
+  y <- DGEList(counts = countdata, group = group)
+  y <- calcNormFactors(y)
+  y <- calcNormFactors(y)
+  y <- estimateCommonDisp(y, verbose=TRUE)
+  y <- estimateTagwiseDisp(y)
+  et <- exactTest(y)
+  resNoFilt <- topTags(et, n=nrow(et$table))
+  restb=resNoFilt$table
+  restable=restb[restb$logFC>0.5,]
+  dt=restable[restable$FDR<0.01,]
+  DEnames <- rownames(dt)
+  #rank degs
+  qlftb=et$table[DEnames,]
+  qlftb$gene=as.character(rownames(qlftb))
+  qlftb$fcsign <- sign(qlftb$logFC)
+  #summary(qlftb$PValue)
+  qlftb$logP=-log10(qlftb$PValue+0.0001)
+  qlftb$metric= qlftb$logP/qlftb$fcsign
+  qlftb$value=ifelse(qlftb$metric==Inf,NA,qlftb$metric)
+  #qlftb=na.omit(qlftb)
+  final<-qlftb[,c("gene", "value")]
+  final=as.tibble(final)
+  ranks <- deframe(final)
+  
+  return(list(et,dt,DEnames,qlftb,ranks))
+}
+##define ad and control group for each cell type
+celltype=sc_dt$ident
+#ast
+ast_adct=scdt[,celltype=='ast']
+metadata=sc_meta$batchCond[which(celltype=='ast')]
+ast_m2=getdeg(metadata,ast_adct)
+astrk2=unlist(ast_m2[5])
+fgseaRes <- fgsea(pathways=pathways.go, stats=astrk2, nperm=100000)
+ast_r2_go=fgseaRes[which(fgseaRes$padj<=0.1),]
+ast_r2_goall=fgseaRes
+fgseaRes <- fgsea(pathways=pathways.kegg, stats=astrk2, nperm=100000)
+ast_r2_keggall=fgseaRes
+ast_re2all=rbind(ast_r2_goall[,c('pathway','NES')],ast_r2_keggall[,c('pathway','NES')])
+colnames(ast_re2all)=c('pathway','ast_NES')
+
+#mic
+mic_adct=scdt[,celltype=='mic']
+metadata=sc_meta$batchCond[which(celltype=='mic')]
+mic_m2=getdeg(metadata,mic_adct)
+micrk2=unlist(mic_m2[5])
+fgseaRes <- fgsea(pathways=pathways.go, stats=micrk2, nperm=100000)
+mic_r2_go=fgseaRes[which(fgseaRes$padj<=0.1),]
+mic_r2_goall=fgseaRes
+fgseaRes <- fgsea(pathways=pathways.kegg, stats=micrk2, nperm=100000)
+mic_r2_keggall=fgseaRes
+mic_re2all=rbind(mic_r2_goall[,c('pathway','NES')],mic_r2_keggall[,c('pathway','NES')])
+colnames(mic_re2all)=c('pathway','mic_NES')
+#oli
+oli_adct=scdt[,celltype=='oli']
+metadata=sc_meta$batchCond[which(celltype=='oli')]
+oli_m2=getdeg(metadata,oli_adct)
+olirk2=unlist(oli_m2[5])
+fgseaRes <- fgsea(pathways=pathways.go, stats=olirk2, nperm=100000)
+oli_r2_go=fgseaRes[which(fgseaRes$padj<=0.1),]
+oli_r2_goall=fgseaRes
+fgseaRes <- fgsea(pathways=pathways.kegg, stats=olirk2, nperm=100000)
+oli_r2_keggall=fgseaRes
+oli_re2all=rbind(oli_r2_goall[,c('pathway','NES')],oli_r2_keggall[,c('pathway','NES')])
+colnames(oli_re2all)=c('pathway','oli_NES')
+#opc
+opc_adct=scdt[,celltype=='opc']
+metadata=sc_meta$batchCond[which(celltype=='opc')]
+opc_m2=getdeg(metadata,opc_adct)
+opcrk2=unlist(opc_m2[5])
+fgseaRes <- fgsea(pathways=pathways.go, stats=opcrk2, nperm=100000)
+opc_r2_go=fgseaRes[which(fgseaRes$padj<=0.1),]
+opc_r2_goall=fgseaRes
+fgseaRes <- fgsea(pathways=pathways.kegg, stats=opcrk2, nperm=100000)
+opc_r2_keggall=fgseaRes
+opc_re2all=rbind(opc_r2_goall[,c('pathway','NES')],opc_r2_keggall[,c('pathway','NES')])
+colnames(opc_re2all)=c('pathway','opc_NES')
+#neu
+neu_adct=scdt[,celltype=='neu']
+metadata=sc_meta$batchCond[which(celltype=='neu')]
+neu_m2=getdeg(metadata,neu_adct)
+neurk2=unlist(neu_m2[5])
+fgseaRes <- fgsea(pathways=pathways.go, stats=neurk2, nperm=100000)
+neu_r2_go=fgseaRes[which(fgseaRes$padj<=0.1),]
+neu_r2_goall=fgseaRes
+fgseaRes <- fgsea(pathways=pathways.kegg, stats=neurk2, nperm=100000)
+neu_r2_keggall=fgseaRes
+neu_re2all=rbind(neu_r2_goall[,c('pathway','NES')],neu_r2_keggall[,c('pathway','NES')])
+colnames(neu_re2all)=c('pathway','neu_NES')
+#end
+end_adct=scdt[,celltype=='end']
+metadata=sc_meta$batchCond[which(celltype=='end')]
+end_m2=getdeg(metadata,end_adct)
+endrk2=unlist(end_m2[5])
+fgseaRes <- fgsea(pathways=pathways.go, stats=endrk2, nperm=100000)
+end_r2_go=fgseaRes[which(fgseaRes$padj<=0.1),]
+end_r2_goall=fgseaRes
+fgseaRes <- fgsea(pathways=pathways.kegg, stats=endrk2, nperm=100000)
+end_r2_keggall=fgseaRes
+end_re2all=rbind(end_r2_goall[,c('pathway','NES')],end_r2_keggall[,c('pathway','NES')])
+colnames(end_re2all)=c('pathway','end_NES')
+
+#hybrid
+hybrid_adct=scdt[,celltype=='hybrid']
+metadata=sc_meta$batchCond[which(celltype=='hybrid')]
+hybrid_m2=getdeg(metadata,hybrid_adct)
+hybridrk2=unlist(hybrid_m2[5])
+fgseaRes <- fgsea(pathways=pathways.go, stats=hybridrk2, nperm=100000)
+hybrid_r2_go=fgseaRes[which(fgseaRes$padj<=0.1),]
+hybrid_r2_goall=fgseaRes
+fgseaRes <- fgsea(pathways=pathways.kegg, stats=hybridrk2, nperm=100000)
+hybrid_r2_keggall=fgseaRes
+hybrid_re2all=rbind(hybrid_r2_goall[,c('pathway','NES')],hybrid_r2_keggall[,c('pathway','NES')])
+colnames(hybrid_re2all)=c('pathway','hybrid_NES')
+
+#undefined
+undefined_adct=scdt[,celltype=='undefined']
+metadata=sc_meta$batchCond[which(celltype=='undefined')]
+undefined_m2=getdeg(metadata,undefined_adct)
+undefinedrk2=unlist(undefined_m2[5])
+fgseaRes <- fgsea(pathways=pathways.go, stats=undefinedrk2, nperm=100000)
+undefined_r2_go=fgseaRes[which(fgseaRes$padj<=0.1),]
+undefined_r2_goall=fgseaRes
+fgseaRes <- fgsea(pathways=pathways.kegg, stats=undefinedrk2, nperm=100000)
+undefined_r2_keggall=fgseaRes
+undefined_re2all=rbind(undefined_r2_goall[,c('pathway','NES')],undefined_r2_keggall[,c('pathway','NES')])
+colnames(undefined_re2all)=c('pathway','undefined_NES')
+
+
+#visualize
+aa=unique(c(undefined_re2all$pathway,hybrid_re2all$pathway,ast_re2all$pathway,opc_re2all$pathway,oli_re2all$pathway,end_re2all$pathway,neu_re2all$pathway,mic_re2all$pathway))
+m2re=as.data.frame(aa)
+colnames(m2re)='pathway'
+m2re=left_join(m2re,oli_re2all)
+m2re=left_join(m2re,ast_re2all)
+m2re=left_join(m2re,mic_re2all)
+m2re=left_join(m2re,opc_re2all)
+m2re=left_join(m2re,neu_re2all)
+m2re=left_join(m2re,hybrid_re2all)
+m2re=left_join(m2re,undefined_re2all)
+m2re=left_join(m2re,end_re2all)
+#rownames(m1re)=substr(m1re[,1],10,300)
+rownames(m2re)=m2re[,1]
+dfm2=m2re[,-1]
+pathway_m2name=rownames(dfm2[rowSums(is.na(dfm2))<1, ])
+pathway_m2=as.data.frame(dfm2[rowSums(is.na(dfm2))<1, ])
+
+pathwayname=substr(pathway_m2name,4,300)
+rownames(pathway_m2)=pathwayname
+
+pathway_m2[is.na(pathway_m2)]<-0
+pheatmap(pathway_m2[1:50,])
+###3. designated subclusters to be Alzheimer’s disease, control, or undetermined based on the cell composition.
+#DE was then performed between cells in the Ad and control subclusters for each cell type
+
+###4. identify subcluster-specific genes within each cell type
+#DE between the subcluster of interest and the average of the remaining subclusters of the same cell type
+#ast
+group= factor(sc_dt$ident,levels = c('mic','oli','ast','hybrid','opc','neu','end','undefined'))
+mic_m1=deanalysis(countMatrix,group)
+
+###5. perform DEG between pairs of subclusters of the same cell type
 
